@@ -92,7 +92,7 @@ def user_input(user_question):
 def text_to_speech(text):
     if not st.session_state.get('mute', False):  # Check the mute state
         engine = pyttsx3.init()
-        engine.setProperty('rate', 170)  # Speed percent (can go over 100)
+        engine.setProperty('rate', 160)  # Speed percent (can go over 100)
         engine.setProperty('volume', 1.0)  # Volume 0-1
         engine.say(text)
         engine.runAndWait()
@@ -285,12 +285,20 @@ def main():
                     st.error("Login failed. Please check your credentials.")
     else:
         # Main Application UI after login
-        with st.sidebar.expander("Upload your documents here upload files below 3MB"):
+        with st.sidebar.expander("Upload your documents here and should not exceed 20MB"):
             documents = st.file_uploader("Upload your documents (PDF, DOCX, XLSX)", type=["pdf", "docx", "xlsx"], accept_multiple_files=True)
-            if st.button("Process Files"):
-                with st.spinner("Processing..."):
-                    raw_text = ""
-                    if documents:
+            max_file_size_mb = 20
+            max_file_size_bytes = max_file_size_mb * 1024 * 1024 
+            if documents:
+                all_text = ""
+                for uploaded_file in documents:
+                    # Check file size
+                    if uploaded_file.size > max_file_size_bytes:
+                        st.error(f"The file '{uploaded_file.name}' exceeds the {max_file_size_mb} MB limit.")
+                        return
+                if st.button("Process Files"):
+                    with st.spinner("Processing..."):
+                        raw_text = ""
                         for doc in documents:
                             if doc.name.endswith(".pdf"):
                                 raw_text += get_pdf_text([doc])
@@ -298,13 +306,13 @@ def main():
                                 raw_text += get_docx_text([doc])
                             elif doc.name.endswith(".xlsx"):
                                 raw_text += get_excel_text([doc])
-                    else:
-                        st.error("Please upload a valid document.")
-                        return
+                            else:
+                                st.error("Please upload a valid document.")
+                                return
 
-                    text_chunks = get_text_chunks(raw_text)
-                    get_vector_store(text_chunks)
-                    st.success("Documents processed and vector store created.")
+                        text_chunks = get_text_chunks(raw_text)
+                        get_vector_store(text_chunks)
+                        st.success("Documents processed and vector store created.")
 
         # Chat interface
         st.header("Chat with Dexter")
@@ -323,14 +331,6 @@ def main():
                     text_to_speech(answer)
             else:
                 st.error("Please enter a question.")
-
-        # Display chat history
-        if st.session_state.chat_history:
-            st.subheader("Chat History")
-            for chat in st.session_state.chat_history:
-                st.write(f"**Question:** {chat['question']}")
-                st.write(f"**Answer:** {chat['answer']}")
-                st.write("---")
 
         # Speech to text functionality
         if st.button("Use Voice Command"):
@@ -352,6 +352,14 @@ def main():
         if st.button(mute_button_label):
             st.session_state.mute = not st.session_state.mute
             st.success(f"Audio {'muted' if st.session_state.mute else 'unmuted'}.")
+
+        # Display chat history
+        if st.session_state.chat_history:
+            st.subheader("Chat History")
+            for chat in st.session_state.chat_history:
+                st.write(f"**Question:** {chat['question']}")
+                st.write(f"**Answer:** {chat['answer']}")
+                st.write("---")
 
 if __name__ == "__main__":
     main()
