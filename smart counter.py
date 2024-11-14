@@ -1,6 +1,6 @@
 import pandas as pd
 from fpdf import FPDF
-import fitz
+import fitz  # PyMuPDF
 from langchain_community.llms import Ollama
 import streamlit as st
 import json
@@ -9,10 +9,10 @@ import pytesseract
 from PIL import Image
 from pathlib import Path
 import asyncio
-from pyppeteer import launch 
+from pyppeteer import launch
 
 # Initialize Ollama model
-llm = Ollama(model="mistral-nemo", base_url="http://localhost:11434")
+llm = Ollama(model="llama3.2", base_url="http://localhost:11434")
 
 # Set output directory for saving converted files
 output_dir = Path("documents")
@@ -38,36 +38,30 @@ async def html_to_pdf_with_pyppeteer(html_file, output_pdf):
     await browser.close()
 
 # Function to convert Excel to PDF
-def excel_to_pdf(excel_file, output_pdf):
+def excel_to_pdf_content_only(excel_file, output_pdf):
     df = pd.read_excel(excel_file)
     pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, ln=True, align="C")
-    pdf.ln(10)
     pdf.set_font("Arial", size=10)
-    columns = df.columns.tolist()
-    for col in columns:
-        pdf.cell(40, 10, col, border=1)
-    pdf.ln()
-    for _, row in df.iterrows():
-        for col in columns:
-            pdf.cell(40, 10, str(row[col]), border=1)
-        pdf.ln()
+    
+    for index, row in df.iterrows():
+        content_line = " ".join([str(cell) for cell in row if pd.notnull(cell)])  # Join all cell contents in a row
+        pdf.multi_cell(0, 10, content_line)  # Output row as a line of text
+        pdf.ln(5)  # Add space between lines for readability
+    
     pdf.output(output_pdf)
 
 # Function to extract text from PDF
 def extract_pdf_text(pdf_file):
     doc = fitz.open(pdf_file)
     text = ""
-    for page in doc:
+    all_text = []
+    for page_number, page in enumerate(doc):
         text = page.get_text("text")
         if not text:  # If no text, attempt OCR
             text = ocr_pdf_page(page)
-        if text:  # Stop early if text is found
-            break
-    return text
+        all_text.append({"page_number": page_number + 1, "content": text})
+    return all_text
 
 # Function to extract text from PDF using OCR
 def ocr_pdf_page(page):
@@ -77,51 +71,22 @@ def ocr_pdf_page(page):
     return text
 
 # Function to parse PDF text into JSON using Ollama with enhanced error handling
-def parse_pdf_to_json(pdf_text):
-    if not pdf_text.strip():
+def parse_pdf_to_json(all_text):
+    if not all_text:
         return {"error": "The PDF content is empty. Skipping JSON conversion."}
 
-    prompt = f"""
-    You are helping convert a PDF document into a structured JSON format.
-    Please output the following content in valid JSON format (without markdown or backticks):
+    pages_json = []
+    for page_data in all_text:
+        page_number = page_data.get('page_number')
+        content = page_data.get('content', "")
+        
+        # Add page content to JSON structure
+        pages_json.append({
+            "page_number": page_number,
+            "content": content
+        })
 
-    {{
-        "pages": [
-
-            {{
-                "page_number": 1,
-                "content": "Text content for the page"
-            }}
-            ...
-        ]
-    }}
-
-    Here’s the content of the PDF:
-    {pdf_text}
-    """
-    try:
-        response = llm.invoke(prompt)
-
-        if not response:
-            return {"error": "Empty response from Ollama model."}
-
-        cleaned_response = response.replace("```json", "").replace("```", "").strip()
-
-        try:
-            json_data = json.loads(cleaned_response)
-        except json.JSONDecodeError as e:
-            return {
-                "error": f"Error parsing JSON: {str(e)}",
-                "content": cleaned_response
-            }
-
-        return json_data
-
-    except Exception as e:
-        return {
-            "error": f"An unexpected error occurred: {str(e)}",
-            "content": "No response or error while invoking Ollama"
-        }
+    return {"pages": pages_json}
 
 # Function to calculate text and image percentages from parsed JSON content
 def calculate_text_and_image_percentage_from_json(json_data):
@@ -170,7 +135,7 @@ if uploaded_files:
                 with open(pdf_file, "wb") as f:
                     f.write(uploaded_file.read())
             elif uploaded_file.type in ["application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]:
-                excel_to_pdf(uploaded_file, str(pdf_file))
+                excel_to_pdf_content_only(uploaded_file, str(pdf_file))
             elif uploaded_file.type == "text/html":
                 html_file_path = output_dir / uploaded_file.name
                 with open(html_file_path, "wb") as f:
@@ -189,8 +154,8 @@ if uploaded_files:
             else:
                 json_outputs = []
                 for pdf_file in pdf_files:
-                    pdf_text = extract_pdf_text(pdf_file)
-                    json_output = parse_pdf_to_json(pdf_text)
+                    all_text = extract_pdf_text(pdf_file)
+                    json_output = parse_pdf_to_json(all_text)
                     
                     if "error" in json_output:
                         st.error(f"Error processing {pdf_file}: {json_output['error']}")
@@ -208,5 +173,11 @@ if uploaded_files:
                             st.json(json_data)
                         else:
                             st.error(json_data)
+
+                        # Save JSON output to file
+                        json_file = output_dir / f"{pdf_file.split('.')[0]}_output.json"
+                        with open(json_file, "w") as f:
+                            json.dump(json_data, f, indent=4)
+                        st.write(f"Saved JSON output for {pdf_file} at {json_file}")
 else:
     st.write("Upload HTML or Excel files to begin conversion.")
