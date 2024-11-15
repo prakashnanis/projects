@@ -51,16 +51,25 @@ def excel_to_pdf_content_only(excel_file, output_pdf):
     
     pdf.output(output_pdf)
 
-# Function to extract text from PDF
+# Function to extract text and image information from PDF
 def extract_pdf_text(pdf_file):
     doc = fitz.open(pdf_file)
-    text = ""
     all_text = []
+    
     for page_number, page in enumerate(doc):
         text = page.get_text("text")
-        if not text:  # If no text, attempt OCR
+        images = len(page.get_images(full=True))  # Count images on the page
+        
+        # If no text, attempt OCR
+        if not text:
             text = ocr_pdf_page(page)
-        all_text.append({"page_number": page_number + 1, "content": text})
+        
+        all_text.append({
+            "page_number": page_number + 1,
+            "content": text,
+            "images": images  # Store image count for each page
+        })
+    
     return all_text
 
 # Function to extract text from PDF using OCR
@@ -79,11 +88,13 @@ def parse_pdf_to_json(all_text):
     for page_data in all_text:
         page_number = page_data.get('page_number')
         content = page_data.get('content', "")
+        images = page_data.get('images', 0)  # Get image count for the page
         
-        # Add page content to JSON structure
+        # Add page content and images count to JSON structure
         pages_json.append({
             "page_number": page_number,
-            "content": content
+            "content": content,
+            "images": images  # Include image count in the JSON
         })
 
     return {"pages": pages_json}
@@ -96,7 +107,7 @@ def calculate_text_and_image_percentage_from_json(json_data):
     for page_data in json_data.get('pages', []):
         page_number = page_data.get('page_number')
         content = page_data.get('content', "")
-        images = page_data.get('images', 0)  # This should be an integer (count of images)
+        images = page_data.get('images', 0)  # This is the image count
 
         text_length = len(content)
         image_count = images
@@ -109,7 +120,8 @@ def calculate_text_and_image_percentage_from_json(json_data):
         page_data_list.append({
             "page_number": page_number,
             "text_percentage": text_percentage,
-            "image_percentage": image_percentage
+            "image_percentage": image_percentage,
+            "image_count": image_count  # Add the count of images per page
         })
     
     return page_data_list
