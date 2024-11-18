@@ -1,6 +1,6 @@
 import pandas as pd
 from fpdf import FPDF
-import fitz  # PyMuPDF for PDF text extraction
+import fitz  # PyMuPDF
 from langchain_community.llms import Ollama
 import streamlit as st
 import json
@@ -8,53 +8,61 @@ import os
 import pytesseract
 from PIL import Image
 from pathlib import Path
+import pdfkit
 
 # Initialize Ollama model
-llm = Ollama(model="llama3.1:latest", base_url="http://localhost:11434")
+llm = Ollama(model="llama3.2:latest", base_url="http://localhost:11434")
 
 # Set output directory for saving converted files
 output_dir = Path("documents")
 output_dir.mkdir(exist_ok=True)  # Ensure the directory exists
 
 # Function to convert HTML to PDF
-def html_to_pdf(html_file, output_pdf):
-    with open(html_file, "r") as file:
-        html_content = file.read()
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
-    pdf.multi_cell(0, 10, html_content)
-    pdf.output(output_pdf)
+path_to_wkhtmltopdf = "C:\\Program Files\\wkhtmltopdf\\bin\\wkhtmltopdf.exe"
+config = pdfkit.configuration(wkhtmltopdf=path_to_wkhtmltopdf)
+def html_to_pdf_with_pdfkit(html_file, output_pdf):
+    try:
+        if os.path.exists(html_file):
+            pdfkit.from_file(html_file, output_pdf, configuration=config)
+            print(f"Successfully converted {html_file} to PDF.")
+        else:
+            raise FileNotFoundError(f"HTML file {html_file} not found.")
+    except Exception as e:
+        print(f"Error converting HTML to PDF: {e}")
 
 # Function to convert Excel to PDF
-def excel_to_pdf(excel_file, output_pdf):
+def excel_to_pdf_content_only(excel_file, output_pdf):
     df = pd.read_excel(excel_file)
     pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, txt="Excel to PDF", ln=True, align="C")
-    pdf.ln(10)
     pdf.set_font("Arial", size=10)
-    columns = df.columns.tolist()
-    for col in columns:
-        pdf.cell(40, 10, col, border=1)
-    pdf.ln()
-    for _, row in df.iterrows():
-        for col in columns:
-            pdf.cell(40, 10, str(row[col]), border=1)
-        pdf.ln()
+    
+    for index, row in df.iterrows():
+        content_line = " ".join([str(cell) for cell in row if pd.notnull(cell)])
+        pdf.multi_cell(0, 10, content_line)
+        pdf.ln(5)
+    
     pdf.output(output_pdf)
 
-# Function to extract text from PDF
+# Function to extract text and image information from PDF
 def extract_pdf_text(pdf_file):
     doc = fitz.open(pdf_file)
-    text = ""
-    for page in doc:
-        text += page.get_text("text")
-        if not text:  # If no text is found, try OCR
+    all_text = []
+    
+    for page_number, page in enumerate(doc):
+        text = page.get_text("text")
+        images = len(page.get_images(full=True))
+        
+        if not text:
             text = ocr_pdf_page(page)
-    return text
+        
+        all_text.append({
+            "page_number": page_number + 1,
+            "content": text,
+            "images": images
+        })
+    
+    return all_text
 
 # Function to extract text from PDF using OCR
 def ocr_pdf_page(page):
@@ -63,84 +71,61 @@ def ocr_pdf_page(page):
     text = pytesseract.image_to_string(pil_image)
     return text
 
-# Function to calculate text and image percentages for each page
-def calculate_text_and_image_percentage(pdf_file):
-    doc = fitz.open(pdf_file)
+# Modified function to parse PDF text into JSON using Ollama
+def parse_pdf_to_json(all_text):
+    if not all_text:
+        return {"error": "No content found in PDF"}
+
+    try:
+        # Simple prompt for Ollama
+        prompt = "Analyze this PDF content and provide insights:\n"
+        for page in all_text:
+            prompt += f"Page {page['page_number']}: {page['content']}\n"
+        
+        # Get Ollama's analysis
+        analysis = llm.invoke(prompt)
+        
+        # Create JSON structure with Ollama's analysis
+        pages_json = []
+        for page in all_text:
+            pages_json.append({
+                "page_number": page['page_number'],
+                "content": page['content'],
+                "images": page['images'],
+                "ollama_analysis": analysis
+            })
+        
+        return {"pages": pages_json}
+    except Exception as e:
+        return {"error": f"Error in Ollama processing: {str(e)}"}
+
+# Function to calculate text and image percentages from parsed JSON content
+def calculate_text_and_image_percentage_from_json(json_data):
     page_data_list = []
 
-    for page_num in range(len(doc)):
-        page = doc.load_page(page_num)
-        text = page.get_text("text")
-        images = page.get_images(full=True)
-        text_length = len(text)
-        image_count = len(images)
+    for page_data in json_data.get('pages', []):
+        page_number = page_data.get('page_number')
+        content = page_data.get('content', "")
+        images = page_data.get('images', 0)
+
+        text_length = len(content)
+        image_count = images
         
         total_content = text_length + image_count * 1000
         text_percentage = (text_length / total_content) * 100 if total_content else 0
         image_percentage = (image_count * 1000 / total_content) * 100 if total_content else 0
-        
+
         page_data_list.append({
-            "page_number": page_num + 1,
+            "page_number": page_number,
             "text_percentage": text_percentage,
-            "image_percentage": image_percentage
+            "image_percentage": image_percentage,
+            "image_count": image_count
         })
+    
     return page_data_list
 
-# Function to parse PDF text into JSON using Ollama with enhanced error handling
-def parse_pdf_to_json(pdf_text):
-    if not pdf_text.strip():
-        return {"error": "The PDF content is empty. Skipping JSON conversion."}
-    
-    prompt = f"""
-    You are helping convert a PDF document into a structured JSON format.
-    Please output the following content in valid JSON format (without markdown or backticks):
-
-    {{
-        "pages": [
-            {{
-                "page_number": 1,
-                "content": "Title, Paragraphs, Tables, Images, etc."
-            }}
-            ...
-        ]
-    }}
-    
-    Here’s the content of the PDF:
-    {pdf_text}
-    """
-    try:
-        response = llm.invoke(prompt)
-        
-        # Check if the response is empty
-        if not response:
-            return {"error": "The LLM returned an empty response. Unable to parse JSON."}
-        
-        # Log the raw response for debugging
-        print("Raw Response from Ollama:")
-        print(response)
-        
-        # Clean the response by removing any markdown or backticks
-        cleaned_response = response.replace("```json", "").replace("```", "").strip()
-
-        # Attempt to parse the response as JSON
-        json_data = json.loads(cleaned_response)
-        return json_data
-
-    except json.JSONDecodeError as e:
-        # Log JSON decoding errors with details
-        return {
-            "error": f"Error parsing JSON: {str(e)}",
-            "content": response
-        }
-    except Exception as e:
-        # Catch all other errors and return a message
-        return {
-            "error": f"An unexpected error occurred: {str(e)}",
-            "content": response
-        }
-
 # Streamlit UI
-st.title("HTML/Excel to PDF and PDF to JSON Converter")
+st.title("Smart Converter 🤖")
 
 # Upload HTML, Excel, and PDF files
 uploaded_files = st.file_uploader(
@@ -160,12 +145,14 @@ if uploaded_files:
                 with open(pdf_file, "wb") as f:
                     f.write(uploaded_file.read())
             elif uploaded_file.type in ["application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]:
-                excel_to_pdf(uploaded_file, str(pdf_file))
+                excel_to_pdf_content_only(uploaded_file, str(pdf_file))
             elif uploaded_file.type == "text/html":
                 html_file_path = output_dir / uploaded_file.name
                 with open(html_file_path, "wb") as f:
                     f.write(uploaded_file.read())
-                html_to_pdf(html_file_path, str(pdf_file))
+                
+                html_to_pdf_with_pdfkit(str(html_file_path), str(pdf_file))
+
             pdf_files.append(pdf_file)
 
         st.write(f"Converted {len(pdf_files)} files to PDF.")
@@ -177,16 +164,13 @@ if uploaded_files:
             else:
                 json_outputs = []
                 for pdf_file in pdf_files:
-                    pdf_text = extract_pdf_text(pdf_file)
-                    page_data_list = calculate_text_and_image_percentage(pdf_file)
-                    
-                    # Parse PDF to JSON for each page
-                    json_output = parse_pdf_to_json(pdf_text)
+                    all_text = extract_pdf_text(pdf_file)
+                    json_output = parse_pdf_to_json(all_text)
                     
                     if "error" in json_output:
                         st.error(f"Error processing {pdf_file}: {json_output['error']}")
                     else:
-                        # Append page-specific text/image percentages
+                        page_data_list = calculate_text_and_image_percentage_from_json(json_output)
                         json_output["pages_info"] = page_data_list
                         json_outputs.append({pdf_file.name: json_output})
 
@@ -198,5 +182,11 @@ if uploaded_files:
                             st.json(json_data)
                         else:
                             st.error(json_data)
+
+                        # Save JSON output to file
+                        json_file = output_dir / f"{pdf_file.split('.')[0]}_output.json"
+                        with open(json_file, "w") as f:
+                            json.dump(json_data, f, indent=4)
+                        st.write(f"Saved JSON output for {pdf_file} at {json_file}")
 else:
     st.write("Upload HTML or Excel files to begin conversion.")
